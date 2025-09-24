@@ -1,0 +1,235 @@
+Info : 
+====
+your_project/
+├── CMakeLists.txt
+├── sdkconfig
+├── main/
+│   ├── main.c
+│   ├── gpio_handler.c / gpio_handler.h
+│   ├── sd_card.c / sd_card.h
+│   ├── audio_player.c / audio_player.h
+│   ├── hw_init.c / hw_init.h
+├── ...
+
+
+main.c
+========
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "gpio_handler.h"
+#include "sd_card.h"
+#include "audio_player.h"
+#include "hw_init.h"
+#include "esp_log.h"
+
+static const char *TAG = "MAIN";
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "Initializing hardware...");
+    init_sd_card();
+    init_gpio_button();
+    init_audio_hw();
+
+    start_gpio_listener();  // Task handles button presses
+}
+
+main/gpio_handler.c
+=====================
+#include "gpio_handler.h"
+#include "audio_player.h"
+#include "esp_log.h"
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+
+#define BUTTON_GPIO GPIO_NUM_0
+
+static const char *TAG = "GPIO_HANDLER";
+static xQueueHandle gpio_evt_queue = NULL;
+
+static void IRAM_ATTR gpio_isr_handler(void* arg) {
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+}
+
+static void gpio_task(void* arg) {
+    uint32_t io_num;
+    while (1) {
+        if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
+            ESP_LOGI(TAG, "Button pressed, playing audio...");
+            play_wav_file("/sdcard/letter_a.wav");
+        }
+    }
+}
+
+void init_gpio_button() {
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_NEGEDGE,
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL << BUTTON_GPIO),
+        .pull_up_en = 1,
+    };
+    gpio_config(&io_conf);
+
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(BUTTON_GPIO, gpio_isr_handler, (void*) BUTTON_GPIO);
+}
+
+void start_gpio_listener() {
+    xTaskCreate(gpio_task, "gpio_task", 4096, NULL, 10, NULL);
+}
+
+main/gpio_handler.h 
+==================
+
+#pragma once
+
+void init_gpio_button();
+void start_gpio_listener();
+
+main/sd_card.c
+===============
+#include "sd_card.h"
+#include "esp_log.h"
+#include "esp_vfs_fat.h"
+#include "driver/sdmmc_host.h"
+#include "driver/sdmmc_defs.h"
+#include "sdmmc_cmd.h"
+
+static const char *TAG = "SD_CARD";
+
+void init_sd_card() {
+    esp_err_t ret;
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 5,
+        .allocation_unit_size = 16 * 1024
+    };
+
+    sdmmc_card_t *card;
+    ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount SD card (%s)", esp_err_to_name(ret));
+        return;
+    }
+    sdmmc_card_print_info(stdout, card);
+}
+
+main/sd_card.h
+==============
+#pragma once
+
+void init_sd_card();
+
+main/audio_player.c
+=====================
+
+#include "audio_player.h"
+#include "esp_log.h"
+#include "driver/i2s.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+static const char *TAG = "AUDIO";
+
+typedef struct {
+    char chunk_id[4];
+    uint32_t chunk_size;
+    char format[4];
+    char subchunk1_id[4];
+    uint32_t subchunk1_size;
+    uint16_t audio_format;
+    uint16_t num_channels;
+    uint32_t sample_rate;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+    char subchunk2_id[4];
+    uint32_t subchunk2_size;
+} wav_header_t;
+
+void play_wav_file(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file: %s", path);
+        return;
+    }
+
+    wav_header_t header;
+    fread(&header, sizeof(header), 1, file);
+
+    ESP_LOGI(TAG, "Sample Rate: %d, Bits: %d", header.sample_rate, header.bits_per_sample);
+
+    i2s_set_clk(I2S_NUM_0, header.sample_rate, header.bits_per_sample, I2S_CHANNEL_STEREO);
+
+    uint8_t *buffer = malloc(1024);
+    size_t bytes_read, bytes_written;
+
+    while ((bytes_read = fread(buffer, 1, 1024, file)) > 0) {
+        i2s_write(I2S_NUM_0, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+    }
+
+    free(buffer);
+    fclose(file);
+}
+
+
+main/audio_player.h
+===================
+#pragma once
+
+void play_wav_file(const char *path);
+
+
+main/hw_init.c
+================
+#include "hw_init.h"
+#include "driver/i2s.h"
+
+void init_audio_hw() {
+    i2s_config_t i2s_config = {
+        .mode = I2S_MODE_MASTER | I2S_MODE_TX,
+        .sample_rate = 16000,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_MSB,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 1024,
+        .use_apll = false,
+        .tx_desc_auto_clear = true,
+    };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = 26,
+        .ws_io_num = 22,
+        .data_out_num = 25,
+        .data_in_num = I2S_PIN_NO_CHANGE
+    };
+
+    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_NUM_0, &pin_config);
+}
+
+main/hw_init.h
+===============
+#pragma once
+
+void init_audio_hw();
+
+Final Notes
+============
+
+Place a file like letter_a.wav on your SD card (16-bit PCM, stereo or mono, 16 kHz).
+
+Connect a speaker via MAX98357A DAC to GPIOs 25 (DIN), 26 (BCLK), 22 (LRC).
+
+Make sure CMakeLists.txt includes all .c files.
+  
