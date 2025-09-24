@@ -1,0 +1,20 @@
+Requirements:
+=============
+1) Initial board release with tamil letters 
+2) The following key functions for the letters, numbers should be supported.  
+  i) tamil letters - 13 + mei ezhthukkal (18) + Samaskirtham (5) = 36 
+  ii) Numbers are not continous in lingododo (need to check how to do the same)?
+  iii) other key functions for 
+      1. (myself + my body and my family)
+      2. (wild animals + farm animals + birds)
+      3. (food + fruits + vegetables)
+      4. (days + weather + months) 
+      5. Athichudi 
+3) Menu functions should be disabled in the screen and controller via rotater. 
+      1. Alphabets 
+      2. Numbers (up to 25)
+      3. music 
+      4. colors 
+      5. Quiz
+4) When the menu gets selected by rotater, corresponding menu function should work (it can be either alphabets, numbers, music, colors, quiz)
+5) LED support. 
